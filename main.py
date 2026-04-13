@@ -5,7 +5,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from fastapi import FastAPI, Request
 import uvicorn
 import asyncio
-from database import init_db, get_user, add_balance, update_user_info
+from database import init_db, get_user, add_balance
 from tinproxy_api import TinProxy
 
 # --- CẤU HÌNH ---
