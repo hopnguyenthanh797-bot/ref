@@ -11,8 +11,8 @@ from datetime import datetime, date
 from flask import Flask, request, jsonify
 
 # ================= CẤU HÌNH HỆ THỐNG =================
-API_TOKEN = 'TOKEN_BOT_CHINH_CUA_BAN' # Điền Token Bot Telegram vào đây
-ADMIN_ID = 123456789  # Thay bằng ID Telegram của bạn
+API_TOKEN = '7663594706:AAE0ecHiiEKGm1h2-EwWJ6bgba3AtWpTGns' # Điền Token Bot Telegram vào đây
+ADMIN_ID = 8615729751  # Thay bằng ID Telegram của bạn
 SUPPORT_LINK = 'https://t.me/username_cua_ban' # Link hỗ trợ
 
 # Thông tin API lấy từ ảnh của bạn
