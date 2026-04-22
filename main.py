@@ -15,16 +15,15 @@ from aiogram.client.default import DefaultBotProperties
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import Integer, String, select, update, ForeignKey
+from sqlalchemy import Integer, String, select, update, ForeignKey, func, Boolean
 
 # ==========================================
 # 1. CẤU HÌNH & BIẾN MÔI TRƯỜNG
 # ==========================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8743099227:AAGXQH4f9SUndwnCjahZ9b_Tsa-yQUGOq4g")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7816353760")) # Thay bằng ID Telegram của bạn
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7816353760"))
 PORT = int(os.environ.get("PORT", 5000))
 
-# Khởi tạo Bot & FastAPI
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 app = FastAPI()
@@ -34,10 +33,8 @@ dp.include_router(router)
 logging.basicConfig(level=logging.INFO)
 
 # ==========================================
-# 2. CẤU TRÚC DATABASE (SQLAlchemy Async)
+# 2. CẤU TRÚC DATABASE (V3: Thêm Giftcode)
 # ==========================================
-# Lưu ý: Trên Render, aiosqlite sẽ bị reset khi deploy lại. 
-# Nếu có Database PostgreSQL trên Render, chỉ cần thay URL dưới đây.
 DB_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql+asyncpg://", 1)
@@ -60,7 +57,7 @@ class Category(Base):
 class Product(Base):
     __tablename__ = "products"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    category_id: Mapped[int] = mapped_column(Integer, ForeignKey("categories.id"))
+    category_id: Mapped[int] = mapped_column(Integer, ForeignKey("categories.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String, nullable=False)
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=True)
@@ -72,7 +69,14 @@ class Order(Base):
     product_name: Mapped[str] = mapped_column(String)
     price: Mapped[int] = mapped_column(Integer)
     target_username: Mapped[str] = mapped_column(String)
-    status: Mapped[str] = mapped_column(String, default="PENDING")
+    status: Mapped[str] = mapped_column(String, default="PENDING") # PENDING / DONE / REFUNDED
+
+class GiftCode(Base):
+    __tablename__ = "giftcodes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String, unique=True, index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
 
 async def init_db():
     async with engine.begin() as conn:
@@ -87,12 +91,26 @@ class BuyState(StatesGroup):
     price = State()
     product_name = State()
 
+class UserActionState(StatesGroup):
+    enter_giftcode = State()
+
 class AdminState(StatesGroup):
+    # Category
     add_category_name = State()
+    del_category = State()
+    # Product
     add_product_category = State()
     add_product_name = State()
     add_product_price = State()
     add_product_desc = State()
+    del_product = State()
+    # Users & Balance
+    manage_balance = State()
+    # Broadcast
+    broadcast_msg = State()
+    # Giftcode
+    add_giftcode_name = State()
+    add_giftcode_amount = State()
 
 # ==========================================
 # 4. GIAO DIỆN INLINE KEYBOARDS
@@ -100,26 +118,27 @@ class AdminState(StatesGroup):
 def main_menu_kb():
     kb = [
         [InlineKeyboardButton(text="🛍 Danh Mục Sản Phẩm", callback_data="show_categories")],
-        [InlineKeyboardButton(text="💳 Nạp Tiền (Auto MSB)", callback_data="topup_info"),
+        [InlineKeyboardButton(text="💳 Nạp Tiền (Auto)", callback_data="topup_info"),
          InlineKeyboardButton(text="👤 Tài Khoản", callback_data="my_profile")],
+        [InlineKeyboardButton(text="📜 Lịch Sử Đơn Hàng", callback_data="my_orders"),
+         InlineKeyboardButton(text="🎁 Nhập Giftcode", callback_data="enter_giftcode")],
         [InlineKeyboardButton(text="🎧 Hỗ Trợ Kỹ Thuật", url=f"tg://user?id={ADMIN_ID}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def admin_menu_kb():
-    kb = [
-        [InlineKeyboardButton(text="📂 Thêm Danh Mục Mới", callback_data="admin_add_cat")],
-        [InlineKeyboardButton(text="📦 Thêm Sản Phẩm Mới", callback_data="admin_add_prod")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+def cancel_admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Hủy Thao Tác", callback_data="admin_cancel")]])
+
+def cancel_user_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Hủy", callback_data="back_main")]])
 
 # ==========================================
 # 5. XỬ LÝ LỆNH BOT (USER TIER)
 # ==========================================
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     async with AsyncSessionLocal() as session:
-        # Check and create user
         stmt = select(User).where(User.telegram_id == message.from_user.id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
@@ -155,7 +174,7 @@ async def show_topup(call: CallbackQuery):
     text = (
         f"🏦 <b>NẠP TIỀN TỰ ĐỘNG QUA SEPAY</b>\n\n"
         f"💳 Ngân hàng: <b>MSB (Ngân hàng Hàng Hải)</b>\n"
-        f"🔢 Số tài khoản: <code>1234567890</code>\n" # Sửa lại số tài khoản thật của bạn
+        f"🔢 Số tài khoản: <code>1234567890</code>\n" 
         f"👤 Chủ tài khoản: <b>NGUYEN VAN A</b>\n\n"
         f"📝 <b>Nội dung chuyển khoản (bắt buộc):</b>\n"
         f"👉 <code>NAP {call.from_user.id}</code>\n\n"
@@ -169,6 +188,58 @@ async def back_to_main(call: CallbackQuery, state: FSMContext):
     await state.clear()
     text = f"🚀 <b>HỆ THỐNG MUA BÁN GROUP & KÊNH TELEGRAM TỰ ĐỘNG</b>"
     await call.message.edit_text(text, reply_markup=main_menu_kb())
+
+# --- XEM LỊCH SỬ ĐƠN HÀNG ---
+@router.callback_query(F.data == "my_orders")
+async def show_my_orders(call: CallbackQuery):
+    async with AsyncSessionLocal() as session:
+        stmt = select(Order).where(Order.user_id == call.from_user.id).order_by(Order.id.desc()).limit(5)
+        orders = (await session.execute(stmt)).scalars().all()
+        
+    if not orders:
+        text = "🤷‍♂️ Bạn chưa có đơn hàng nào."
+    else:
+        text = "📜 <b>5 ĐƠN HÀNG GẦN NHẤT CỦA BẠN:</b>\n\n"
+        for o in orders:
+            status_str = "⏳ Đang xử lý" if o.status == "PENDING" else "✅ Hoàn thành" if o.status == "DONE" else "❌ Đã Hoàn Tiền"
+            text += f"🔹 <b>Mã ĐH:</b> #{o.id}\n"
+            text += f"📦 <b>SP:</b> {o.product_name} ({o.price:,}đ)\n"
+            text += f"🎯 <b>Nhận tại:</b> {o.target_username}\n"
+            text += f"📈 <b>Trạng thái:</b> {status_str}\n"
+            text += "------------------------\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Quay lại", callback_data="back_main")]])
+    await call.message.edit_text(text, reply_markup=kb)
+
+# --- NHẬP GIFTCODE ---
+@router.callback_query(F.data == "enter_giftcode")
+async def ask_giftcode(call: CallbackQuery, state: FSMContext):
+    await state.set_state(UserActionState.enter_giftcode)
+    await call.message.edit_text("🎁 Vui lòng nhập mã Giftcode của bạn vào đây:", reply_markup=cancel_user_kb())
+
+@router.message(UserActionState.enter_giftcode)
+async def process_giftcode(message: Message, state: FSMContext):
+    code_input = message.text.strip()
+    async with AsyncSessionLocal() as session:
+        # Tìm Giftcode
+        gcode = (await session.execute(select(GiftCode).where(GiftCode.code == code_input))).scalar_one_or_none()
+        
+        if not gcode:
+            await message.answer("❌ Mã Giftcode không tồn tại. Thử lại:", reply_markup=cancel_user_kb())
+            return
+        if gcode.is_used:
+            await message.answer("❌ Mã Giftcode này đã được sử dụng. Thử lại:", reply_markup=cancel_user_kb())
+            return
+            
+        # Nếu OK, cộng tiền và đổi trạng thái
+        gcode.is_used = True
+        user = (await session.execute(select(User).where(User.telegram_id == message.from_user.id))).scalar_one()
+        user.balance += gcode.amount
+        await session.commit()
+        
+    await state.clear()
+    await message.answer(f"🎉 <b>CHÚC MỪNG!</b>\nBạn đã nạp thành công mã Giftcode.\n💰 Tài khoản được cộng: <b>{gcode.amount:,} VNĐ</b>")
+    await cmd_start(message, state) # Quay về menu
 
 # --- LUỒNG MUA HÀNG ---
 @router.callback_query(F.data == "show_categories")
@@ -236,7 +307,6 @@ async def process_buy(call: CallbackQuery, state: FSMContext):
             await call.answer("❌ Số dư không đủ! Vui lòng nạp thêm.", show_alert=True)
             return
 
-    # Set State yêu cầu nhập Username
     await state.update_data(product_id=product.id, price=product.price, product_name=product.name)
     await state.set_state(BuyState.waiting_for_username)
     
@@ -253,7 +323,7 @@ async def process_buy(call: CallbackQuery, state: FSMContext):
 async def confirm_purchase(message: Message, state: FSMContext):
     username = message.text.strip()
     if not username.startswith("@"):
-        await message.answer("❌ Username phải bắt đầu bằng ký tự '@'. Vui lòng nhập lại:")
+        await message.answer("❌ Username phải bắt đầu bằng ký tự '@'. Vui lòng nhập lại:", reply_markup=cancel_user_kb())
         return
         
     data = await state.get_data()
@@ -263,18 +333,17 @@ async def confirm_purchase(message: Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
         user = (await session.execute(select(User).where(User.telegram_id == message.from_user.id))).scalar_one()
         
-        # Check lại balance lần cuối tránh race condition
         if user.balance < price:
-            await message.answer("❌ Số dư của bạn không đủ để thực hiện giao dịch này.")
+            await message.answer("❌ Số dư của bạn không đủ. Giao dịch bị hủy.")
             await state.clear()
             return
             
-        # Trừ tiền
         user.balance -= price
-        # Lưu Order
-        new_order = Order(user_id=message.from_user.id, product_name=p_name, price=price, target_username=username)
+        new_order = Order(user_id=message.from_user.id, product_name=p_name, price=price, target_username=username, status="PENDING")
         session.add(new_order)
         await session.commit()
+        await session.refresh(new_order) # Lấy ID của order vừa tạo
+        order_id = new_order.id
 
     await state.clear()
     await message.answer(
@@ -284,95 +353,304 @@ async def confirm_purchase(message: Message, state: FSMContext):
         f"⏳ Admin đã nhận được lệnh và sẽ tiến hành transfer cho bạn trong ít phút."
     )
     
-    # Bắn thông báo cho Admin
+    # BẮN BILL CHO ADMIN KÈM NÚT DUYỆT ĐƠN (V3)
     admin_msg = (
-        f"🚨 <b>ĐƠN HÀNG MỚI</b> 🚨\n\n"
-        f"👤 Khách hàng: <code>{message.from_user.id}</code>\n"
+        f"🚨 <b>ĐƠN HÀNG MỚI TỪ BOT</b> 🚨\n\n"
+        f"🔢 Mã ĐH: <b>#{order_id}</b>\n"
+        f"👤 ID Khách: <code>{message.from_user.id}</code>\n"
         f"📦 Sản phẩm: <b>{p_name}</b>\n"
-        f"💰 Tiền thu: {price:,} VNĐ\n"
-        f"🎯 <b>Acc Nhận:</b> {username}"
+        f"💰 Giá trị: {price:,} VNĐ\n"
+        f"🎯 <b>Cần Transfer vào Acc:</b> {username}\n\n"
+        f"<i>⚠️ Vui lòng thao tác Transfer trong Group/Kênh xong thì ấn nút bên dưới để báo cho Khách.</i>"
     )
+    
+    admin_bill_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Xong! Báo Khách Nhận Kênh", callback_data=f"ad_ord_done_{order_id}")],
+        [InlineKeyboardButton(text="❌ Lỗi / Hủy & Hoàn Tiền Khách", callback_data=f"ad_ord_fail_{order_id}")]
+    ])
+    
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_msg)
-    except Exception as e:
-        logging.error(f"Failed to send admin alert: {e}")
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_msg, reply_markup=admin_bill_kb)
+    except:
+        pass
+
 
 # ==========================================
-# 6. XỬ LÝ LỆNH ADMIN (Tùy chỉnh danh mục/SP)
+# 6. XỬ LÝ LỆNH ADMIN (XỊN XÒ PRO MAX V3)
 # ==========================================
+
+async def get_admin_dashboard_text():
+    async with AsyncSessionLocal() as session:
+        total_users = (await session.execute(select(func.count(User.id)))).scalar()
+        total_cats = (await session.execute(select(func.count(Category.id)))).scalar()
+        total_prods = (await session.execute(select(func.count(Product.id)))).scalar()
+        total_orders = (await session.execute(select(func.count(Order.id)))).scalar()
+        
+        text = (
+            f"👑 <b>BẢNG ĐIỀU KHIỂN QUẢN TRỊ VIÊN</b>\n\n"
+            f"👥 Tổng User: <b>{total_users}</b>\n"
+            f"📂 Danh mục: <b>{total_cats}</b> | 📦 Sản phẩm: <b>{total_prods}</b>\n"
+            f"🛒 Tổng Đơn Hàng: <b>{total_orders}</b>\n\n"
+            f"<i>Lựa chọn thao tác bên dưới:</i>"
+        )
+        return text
+
+def super_admin_kb():
+    kb = [
+        [InlineKeyboardButton(text="➕ Thêm Danh Mục", callback_data="adm_add_cat"),
+         InlineKeyboardButton(text="🗑 Xóa Danh Mục", callback_data="adm_del_cat")],
+        [InlineKeyboardButton(text="➕ Thêm Sản Phẩm", callback_data="adm_add_prod"),
+         InlineKeyboardButton(text="🗑 Xóa Sản Phẩm", callback_data="adm_del_prod")],
+        [InlineKeyboardButton(text="🎫 Tạo Mã Giftcode Mới", callback_data="adm_make_giftcode")],
+        [InlineKeyboardButton(text="💰 Cộng/Trừ Tiền User", callback_data="adm_money")],
+        [InlineKeyboardButton(text="📢 Gửi Thông Báo Toàn Bot", callback_data="adm_broadcast")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 @router.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    await message.answer("🛠 <b>QUẢN TRỊ HỆ THỐNG</b>\nChọn thao tác:", reply_markup=admin_menu_kb())
+async def cmd_admin(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.clear()
+    text = await get_admin_dashboard_text()
+    await message.answer(text, reply_markup=super_admin_kb())
 
-@router.callback_query(F.data == "admin_add_cat")
-async def admin_ask_cat(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "admin_cancel")
+async def cancel_admin_action(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text = await get_admin_dashboard_text()
+    await call.message.edit_text(text, reply_markup=super_admin_kb())
+
+# --- ADMIN DUYỆT ĐƠN TỪ NÚT BẤM KHI CÓ BILL (V3) ---
+@router.callback_query(F.data.startswith("ad_ord_"))
+async def admin_process_order(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
+    action_parts = call.data.split("_")
+    action_type = action_parts[2] # "done" hoặc "fail"
+    order_id = int(action_parts[3])
+    
+    async with AsyncSessionLocal() as session:
+        order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            await call.answer("Đơn hàng không tồn tại!", show_alert=True)
+            return
+            
+        if order.status != "PENDING":
+            await call.answer("Đơn hàng này đã được xử lý từ trước rồi!", show_alert=True)
+            return
+            
+        if action_type == "done":
+            order.status = "DONE"
+            await session.commit()
+            await call.message.edit_text(call.message.text + "\n\n✅ <b>BẠN ĐÃ DUYỆT ĐƠN NÀY (ĐÃ TRANSFER).</b>")
+            # Báo cho khách
+            try:
+                await bot.send_message(order.user_id, f"🎉 <b>TIN VUI TỪ ADMIN!</b>\n\nĐơn hàng <b>#{order.id} ({order.product_name})</b> của bạn đã được Admin xử lý Transfer quyền Owner thành công. Vui lòng check Telegram nhé!")
+            except: pass
+            
+        elif action_type == "fail":
+            order.status = "REFUNDED"
+            # Hoàn tiền cho User
+            user = (await session.execute(select(User).where(User.telegram_id == order.user_id))).scalar_one()
+            user.balance += order.price
+            await session.commit()
+            
+            await call.message.edit_text(call.message.text + "\n\n❌ <b>BẠN ĐÃ HỦY ĐƠN VÀ HOÀN TIỀN CHO KHÁCH.</b>")
+            # Báo cho khách
+            try:
+                await bot.send_message(order.user_id, f"⚠️ <b>THÔNG BÁO HỦY ĐƠN HÀNG!</b>\n\nĐơn hàng <b>#{order.id} ({order.product_name})</b> của bạn đã bị hủy do một số lỗi kỹ thuật hoặc hết hàng.\n💰 Hệ thống đã hoàn lại <b>{order.price:,} VNĐ</b> vào số dư của bạn. Thành thật xin lỗi vì sự bất tiện này!")
+            except: pass
+
+# --- TẠO GIFTCODE (V3) ---
+@router.callback_query(F.data == "adm_make_giftcode")
+async def adm_make_giftcode(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminState.add_giftcode_name)
+    await call.message.edit_text("🎫 Nhập CHỮ (Mã) Giftcode bạn muốn tạo (VD: VIP2026, TANTHU...):", reply_markup=cancel_admin_kb())
+
+@router.message(AdminState.add_giftcode_name)
+async def adm_ask_gift_amount(message: Message, state: FSMContext):
+    await state.update_data(g_code=message.text.strip().upper())
+    await state.set_state(AdminState.add_giftcode_amount)
+    await message.answer("💰 Nhập SỐ TIỀN được cộng cho mã Giftcode này:", reply_markup=cancel_admin_kb())
+
+@router.message(AdminState.add_giftcode_amount)
+async def adm_save_giftcode(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        
+        async with AsyncSessionLocal() as session:
+            new_gift = GiftCode(code=data['g_code'], amount=amount)
+            session.add(new_gift)
+            await session.commit()
+            
+        await message.answer(f"✅ Đã tạo Giftcode thành công!\n\nMã: <code>{data['g_code']}</code>\nTrị giá: <b>{amount:,} VNĐ</b>", reply_markup=super_admin_kb())
+        await state.clear()
+    except Exception as e:
+        await message.answer("❌ Có lỗi xảy ra (có thể mã bị trùng hoặc nhập sai số tiền). Vui lòng thử lại:")
+
+# --- QUẢN LÝ DANH MỤC ---
+@router.callback_query(F.data == "adm_add_cat")
+async def adm_add_cat(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.add_category_name)
-    await call.message.edit_text("📝 Nhập tên Danh Mục mới:")
+    await call.message.edit_text("📝 Nhập TÊN Danh Mục mới:", reply_markup=cancel_admin_kb())
 
 @router.message(AdminState.add_category_name)
-async def admin_save_cat(message: Message, state: FSMContext):
-    cat_name = message.text.strip()
+async def adm_save_cat(message: Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
-        new_cat = Category(name=cat_name)
+        new_cat = Category(name=message.text.strip())
         session.add(new_cat)
         await session.commit()
-    await message.answer(f"✅ Đã thêm danh mục: <b>{cat_name}</b>", reply_markup=admin_menu_kb())
-    await state.clear()
+    await message.answer(f"✅ Thêm danh mục <b>{message.text}</b> thành công!")
+    await cmd_admin(message, state)
 
-@router.callback_query(F.data == "admin_add_prod")
-async def admin_ask_prod_cat(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
+@router.callback_query(F.data == "adm_del_cat")
+async def adm_del_cat_list(call: CallbackQuery):
     async with AsyncSessionLocal() as session:
         categories = (await session.execute(select(Category))).scalars().all()
-        
+    if not categories:
+        await call.answer("Chưa có danh mục nào!", show_alert=True)
+        return
+    kb = [[InlineKeyboardButton(text=f"🗑 Xóa: {c.name}", callback_data=f"delcat_{c.id}")] for c in categories]
+    kb.append([InlineKeyboardButton(text="❌ Hủy", callback_data="admin_cancel")])
+    await call.message.edit_text("⚠️ <b>Chọn Danh Mục để XÓA:</b>\n<i>(Lưu ý: Xóa danh mục sẽ KHÔNG xóa sản phẩm bên trong nó)</i>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("delcat_"))
+async def adm_do_del_cat(call: CallbackQuery):
+    c_id = int(call.data.split("_")[1])
+    async with AsyncSessionLocal() as session:
+        cat = (await session.execute(select(Category).where(Category.id == c_id))).scalar_one_or_none()
+        if cat:
+            await session.delete(cat)
+            await session.commit()
+            await call.answer("✅ Xóa thành công!", show_alert=True)
+    text = await get_admin_dashboard_text()
+    await call.message.edit_text(text, reply_markup=super_admin_kb())
+
+# --- QUẢN LÝ SẢN PHẨM ---
+@router.callback_query(F.data == "adm_add_prod")
+async def adm_add_prod_cat(call: CallbackQuery, state: FSMContext):
+    async with AsyncSessionLocal() as session:
+        categories = (await session.execute(select(Category))).scalars().all()
     if not categories:
         await call.answer("❌ Phải tạo Danh Mục trước!", show_alert=True)
         return
-        
-    kb = []
-    for cat in categories:
-        kb.append([InlineKeyboardButton(text=cat.name, callback_data=f"selcat_{cat.id}")])
-    
-    await call.message.edit_text("📂 Chọn danh mục cho sản phẩm mới:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    kb = [[InlineKeyboardButton(text=c.name, callback_data=f"pcat_{c.id}")] for c in categories]
+    kb.append([InlineKeyboardButton(text="❌ Hủy", callback_data="admin_cancel")])
+    await call.message.edit_text("📂 Chọn danh mục cho Sản Phẩm mới:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@router.callback_query(F.data.startswith("selcat_"))
-async def admin_ask_prod_name(call: CallbackQuery, state: FSMContext):
-    cat_id = int(call.data.split("_")[1])
-    await state.update_data(cat_id=cat_id)
+@router.callback_query(F.data.startswith("pcat_"))
+async def adm_add_prod_name(call: CallbackQuery, state: FSMContext):
+    await state.update_data(cat_id=int(call.data.split("_")[1]))
     await state.set_state(AdminState.add_product_name)
-    await call.message.edit_text("📝 Nhập TÊN sản phẩm:")
+    await call.message.edit_text("📝 Nhập TÊN sản phẩm:", reply_markup=cancel_admin_kb())
 
 @router.message(AdminState.add_product_name)
-async def admin_ask_prod_price(message: Message, state: FSMContext):
+async def adm_add_prod_price(message: Message, state: FSMContext):
     await state.update_data(p_name=message.text.strip())
     await state.set_state(AdminState.add_product_price)
-    await message.answer("💰 Nhập GIÁ sản phẩm (Viết số, vd: 500000):")
+    await message.answer("💰 Nhập GIÁ (Số nguyên, vd: 500000):", reply_markup=cancel_admin_kb())
 
 @router.message(AdminState.add_product_price)
-async def admin_ask_prod_desc(message: Message, state: FSMContext):
+async def adm_add_prod_desc(message: Message, state: FSMContext):
     try:
-        price = int(message.text.strip())
-        await state.update_data(p_price=price)
+        await state.update_data(p_price=int(message.text.strip()))
         await state.set_state(AdminState.add_product_desc)
-        await message.answer("📋 Nhập MÔ TẢ sản phẩm:")
-    except ValueError:
-        await message.answer("❌ Giá phải là số nguyên. Nhập lại:")
+        await message.answer("📋 Nhập MÔ TẢ sản phẩm:", reply_markup=cancel_admin_kb())
+    except:
+        await message.answer("❌ Lỗi: Giá tiền phải là số. Nhập lại:")
 
 @router.message(AdminState.add_product_desc)
-async def admin_save_prod(message: Message, state: FSMContext):
-    desc = message.text.strip()
+async def adm_save_prod(message: Message, state: FSMContext):
     data = await state.get_data()
-    
     async with AsyncSessionLocal() as session:
-        new_prod = Product(category_id=data['cat_id'], name=data['p_name'], price=data['p_price'], description=desc)
+        new_prod = Product(category_id=data['cat_id'], name=data['p_name'], price=data['p_price'], description=message.text.strip())
         session.add(new_prod)
         await session.commit()
+    await message.answer(f"✅ Đã thêm SP: <b>{data['p_name']}</b>")
+    await cmd_admin(message, state)
+
+@router.callback_query(F.data == "adm_del_prod")
+async def adm_del_prod_list(call: CallbackQuery):
+    async with AsyncSessionLocal() as session:
+        products = (await session.execute(select(Product))).scalars().all()
+    if not products:
+        await call.answer("Chưa có sản phẩm nào!", show_alert=True)
+        return
+    kb = [[InlineKeyboardButton(text=f"🗑 Xóa: {p.name}", callback_data=f"delp_{p.id}")] for p in products]
+    kb.append([InlineKeyboardButton(text="❌ Hủy", callback_data="admin_cancel")])
+    await call.message.edit_text("⚠️ <b>Chọn Sản Phẩm để XÓA:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("delp_"))
+async def adm_do_del_prod(call: CallbackQuery):
+    p_id = int(call.data.split("_")[1])
+    async with AsyncSessionLocal() as session:
+        prod = (await session.execute(select(Product).where(Product.id == p_id))).scalar_one_or_none()
+        if prod:
+            await session.delete(prod)
+            await session.commit()
+            await call.answer("✅ Xóa SP thành công!", show_alert=True)
+    text = await get_admin_dashboard_text()
+    await call.message.edit_text(text, reply_markup=super_admin_kb())
+
+# --- QUẢN LÝ TIỀN & BROADCAST ---
+@router.callback_query(F.data == "adm_money")
+async def adm_money(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminState.manage_balance)
+    text = (
+        "💰 <b>CỘNG/TRỪ TIỀN THỦ CÔNG</b>\n\n"
+        "Nhắn tin theo cú pháp sau để cộng/trừ tiền User:\n"
+        "👉 Cú pháp: <code>ID_USER SỐ_TIỀN</code>\n\n"
+        "<i>Ví dụ cộng 50k:</i> <code>123456789 50000</code>\n"
+        "<i>Ví dụ trừ 50k:</i> <code>123456789 -50000</code>"
+    )
+    await call.message.edit_text(text, reply_markup=cancel_admin_kb())
+
+@router.message(AdminState.manage_balance)
+async def adm_exec_money(message: Message, state: FSMContext):
+    try:
+        parts = message.text.split()
+        target_id = int(parts[0])
+        amount = int(parts[1])
         
-    await message.answer(f"✅ Đã thêm sản phẩm <b>{data['p_name']}</b> thành công!", reply_markup=admin_menu_kb())
-    await state.clear()
+        async with AsyncSessionLocal() as session:
+            user = (await session.execute(select(User).where(User.telegram_id == target_id))).scalar_one_or_none()
+            if not user:
+                await message.answer("❌ User ID này chưa từng chat với Bot.")
+                return
+            user.balance += amount
+            await session.commit()
+            
+            await bot.send_message(target_id, f"🔔 Admin vừa biến động số dư của bạn: <b>{amount:,} VNĐ</b>")
+            await message.answer(f"✅ Đã cộng/trừ <b>{amount:,}đ</b> cho User <code>{target_id}</code> thành công.")
+            await cmd_admin(message, state)
+    except:
+        await message.answer("❌ Cú pháp sai. Hãy nhập ID SỐ_TIỀN (Ví dụ: 123456789 50000)")
+
+@router.callback_query(F.data == "adm_broadcast")
+async def adm_broadcast(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminState.broadcast_msg)
+    await call.message.edit_text("📢 Nhập nội dung tin nhắn bạn muốn gửi cho TẤT CẢ User:", reply_markup=cancel_admin_kb())
+
+@router.message(AdminState.broadcast_msg)
+async def adm_exec_broadcast(message: Message, state: FSMContext):
+    msg_text = message.text
+    await message.answer("⏳ Đang tiến hành gửi tin nhắn cho toàn bộ User...")
+    
+    async with AsyncSessionLocal() as session:
+        users = (await session.execute(select(User))).scalars().all()
+        
+    success = 0
+    for u in users:
+        try:
+            await bot.send_message(u.telegram_id, f"📢 <b>THÔNG BÁO TỪ ADMIN:</b>\n\n{msg_text}")
+            success += 1
+            await asyncio.sleep(0.05) # Tránh bị Telegram flood limit
+        except:
+            pass # User đã block bot
+            
+    await message.answer(f"✅ <b>Hoàn tất!</b> Đã gửi thành công đến {success}/{len(users)} users.")
+    await cmd_admin(message, state)
+
 
 # ==========================================
 # 7. FASTAPI CATCH WEBHOOK SEPAY (NẠP TỰ ĐỘNG)
@@ -384,7 +662,6 @@ async def sepay_webhook(request: Request):
         amount = int(data.get('transferAmount', 0))
         content = str(data.get('content', '')).upper()
         
-        # Cú pháp: NAP <USER_ID>
         match = re.search(r'NAP\s+(\d+)', content)
         if match and amount > 0:
             user_id = int(match.group(1))
@@ -395,15 +672,13 @@ async def sepay_webhook(request: Request):
                     user.balance += amount
                     await session.commit()
                     
-                    # Bắn tin nhắn cho user thông qua API của Bot
                     try:
                         await bot.send_message(
                             chat_id=user_id, 
                             text=f"✅ <b>NẠP TIỀN THÀNH CÔNG</b>\n\nTài khoản của bạn vừa được cộng <b>{amount:,} VNĐ</b> từ MSB!"
                         )
-                    except Exception as e:
-                        logging.error(f"Cannot send topup message to user: {e}")
-                        
+                    except:
+                        pass
         return {"status": "success"}
     except Exception as e:
         logging.error(f"Webhook error: {e}")
@@ -419,11 +694,8 @@ async def health_check():
 @app.on_event("startup")
 async def on_startup():
     await init_db()
-    # Chạy Polling của Bot dưới dạng Task ngầm bên trong Event Loop của FastAPI
     asyncio.create_task(dp.start_polling(bot))
     logging.info("🚀 Bot Telegram đã khởi động...")
 
 if __name__ == "__main__":
-    # Render sẽ cung cấp biến môi trường PORT
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-    
