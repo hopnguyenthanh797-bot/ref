@@ -172,10 +172,10 @@ async def show_profile(call: CallbackQuery):
 @router.callback_query(F.data == "topup_info")
 async def show_topup(call: CallbackQuery):
     text = (
-        f"🏦 <b>NẠP TIỀN TỰ ĐỘNG QUA SEPAY</b>\n\n"
+        f"🏦 <b>NẠP TIỀN TỰ ĐỘNG </b>\n\n"
         f"💳 Ngân hàng: <b>MSB (Ngân hàng Hàng Hải)</b>\n"
-        f"🔢 Số tài khoản: <code>1234567890</code>\n" 
-        f"👤 Chủ tài khoản: <b>NGUYEN VAN A</b>\n\n"
+        f"🔢 Số tài khoản: <code>96886693002613</code>\n" 
+        f"👤 Chủ tài khoản: <b>NGUYEN THANH HOP</b>\n\n"
         f"📝 <b>Nội dung chuyển khoản (bắt buộc):</b>\n"
         f"👉 <code>NAP {call.from_user.id}</code>\n\n"
         f"<i>⚠️ Hệ thống xử lý tự động trong 3 - 5 giây. Nếu sai nội dung vui lòng liên hệ Admin.</i>"
