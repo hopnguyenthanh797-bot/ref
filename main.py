@@ -7,6 +7,15 @@ import asyncio
 import aiofiles
 from datetime import datetime
 
+# ==========================================
+# FIX LỖI CỦA PYROGRAM TRÊN PYTHON MỚI (RENDER)
+# Đảm bảo có Event Loop trước khi import Pyrogram
+# ==========================================
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from fastapi import FastAPI, Request
 import uvicorn
 from pyrogram import Client
@@ -211,7 +220,6 @@ async def show_products_in_cat(call: CallbackQuery):
         btn_text = f"📦 {pos.get('position_name')} | {sell_price:,}đ | [{pos.get('stock')}]"
         builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"buy_{pos.get('position_id')}_{sell_price}"))
     
-    # Điều hướng
     nav_row = []
     if total_pages > 1:
         nav_row.append(InlineKeyboardButton(text="⬅️ Trước", callback_data=f"showcat_{cat_id}_{page-1}") if page > 1 else InlineKeyboardButton(text="➖", callback_data="ignore_btn"))
