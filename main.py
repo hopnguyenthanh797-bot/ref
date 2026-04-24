@@ -26,11 +26,13 @@ ITEMS_PER_PAGE = 8  # Số sản phẩm hiển thị trên 1 trang (giống vide
 
 # --- FSM CHO ADMIN ---
 class AdminStates(StatesGroup):
-    waiting_for_user_id = State()
-    waiting_for_amount = State()
     waiting_for_markup = State()
     waiting_for_guide = State()
     waiting_for_bank = State()
+    waiting_for_search_user = State()
+    waiting_for_add_money = State()
+    waiting_for_deduct_money = State()
+    waiting_for_broadcast = State()
 
 # --- HELPER: TÍNH TOÁN VIP ---
 def get_vip_info(total_deposit: int):
@@ -100,7 +102,7 @@ async def start_cmd(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "menu_main")
 async def back_main(call: CallbackQuery, state: FSMContext):
-    await call.answer() # Khử lỗi treo
+    await call.answer() 
     await state.clear()
     user = await db.get_user(call.from_user.id, call.from_user.full_name)
     text = (
@@ -116,7 +118,7 @@ async def back_main(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "menu_profile")
 async def show_profile(call: CallbackQuery):
-    await call.answer() # Khử lỗi treo
+    await call.answer() 
     user = await db.get_user(call.from_user.id, call.from_user.full_name)
     rank, discount, progress, bar, remain = get_vip_info(user['total_deposit'])
     
@@ -184,9 +186,8 @@ async def show_categories(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("showcat_"))
 async def show_products_in_cat(call: CallbackQuery):
-    await call.answer() # Khử lỗi treo
+    await call.answer()
     
-    # Data có dạng: showcat_123_1 (trong đó 123 là cat_id, 1 là page)
     parts = call.data.split("_")
     cat_id = int(parts[1])
     page = int(parts[2])
@@ -198,7 +199,6 @@ async def show_products_in_cat(call: CallbackQuery):
     cat_name_display = "Sản Phẩm"
     active_products = []
     
-    # Tìm danh mục và lọc các sản phẩm còn hàng
     for cat in res.get("data", []):
         if cat.get("category_id") == cat_id:
             cat_name_display = cat.get("category_name")
@@ -207,7 +207,6 @@ async def show_products_in_cat(call: CallbackQuery):
                     active_products.append(pos)
             break
 
-    # Tính toán phân trang
     total_items = len(active_products)
     total_pages = math.ceil(total_items / ITEMS_PER_PAGE)
     if total_pages == 0: total_pages = 1
@@ -220,7 +219,6 @@ async def show_products_in_cat(call: CallbackQuery):
 
     builder = InlineKeyboardBuilder()
     
-    # Hiển thị sản phẩm của trang hiện tại
     for pos in current_page_products:
         pos_id = pos.get("position_id")
         pos_name = pos.get("position_name")
@@ -231,18 +229,17 @@ async def show_products_in_cat(call: CallbackQuery):
         btn_text = f"{pos_name} | {sell_price:,}đ | [{stock}]"
         builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"buy_{pos_id}_{sell_price}"))
     
-    # Xây dựng thanh điều hướng phân trang (Giống hệt video sếp gửi)
     nav_row = []
     if total_pages > 1:
         if page > 1:
-            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"showcat_{cat_id}_{page-1}"))
+            nav_row.append(InlineKeyboardButton(text="⬅️ Trang trước", callback_data=f"showcat_{cat_id}_{page-1}"))
         else:
             nav_row.append(InlineKeyboardButton(text="➖", callback_data="ignore_btn"))
             
         nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="ignore_btn"))
         
         if page < total_pages:
-            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"showcat_{cat_id}_{page+1}"))
+            nav_row.append(InlineKeyboardButton(text="Trang sau ➡️", callback_data=f"showcat_{cat_id}_{page+1}"))
         else:
             nav_row.append(InlineKeyboardButton(text="➖", callback_data="ignore_btn"))
             
@@ -258,7 +255,6 @@ async def show_products_in_cat(call: CallbackQuery):
 # ==========================================
 @dp.callback_query(F.data.startswith("buy_"))
 async def process_buy(call: CallbackQuery):
-    # Khử lỗi treo & Báo cho người dùng biết bot đang xử lý
     await call.answer("⏳ Đang xử lý giao dịch...", show_alert=False) 
     
     _, pos_id, sell_price = call.data.split("_")
@@ -267,7 +263,6 @@ async def process_buy(call: CallbackQuery):
     
     user = await db.get_user(call.from_user.id, call.from_user.full_name)
     
-    # Xử lý Discount từ VIP
     rank, discount, _, _, _ = get_vip_info(user['total_deposit'])
     final_price = int(sell_price - (sell_price * discount / 100))
     
@@ -375,96 +370,241 @@ async def sepay_webhook(request: Request):
         return {"success": False, "error": str(e)}
 
 # ==========================================
-# ADMIN PANEL
+# ADMIN PANEL (PRO MAX)
 # ==========================================
+def get_cancel_button():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="❌ Hủy thao tác", callback_data="admin_cancel"))
+    return builder.as_markup()
+
+@dp.callback_query(F.data == "admin_cancel")
+async def admin_cancel_action(call: CallbackQuery, state: FSMContext):
+    await call.answer("Đã hủy thao tác!", show_alert=False)
+    await state.clear()
+    await admin_menu(call) # Quay về menu admin chính
+
 @dp.callback_query(F.data == "admin_panel")
 async def admin_menu(call: CallbackQuery):
     if call.from_user.id not in config.ADMIN_IDS:
-        return await call.answer("❌ Cấm!", show_alert=True)
+        return await call.answer("❌ Bạn không có quyền Admin!", show_alert=True)
     
-    await call.answer("Đang lấy thông tin nguồn...", show_alert=False)
+    await call.answer("Đang lấy thống kê hệ thống...", show_alert=False)
+    
+    # Kéo số dư nguồn
     balance_res = await trum_api.get_balance()
     admin_balance = balance_res.get("balance", 0) if balance_res.get("success") else "Lỗi API"
-    settings = await db.get_settings()
     
+    # Lấy thống kê từ Supabase trực tiếp
+    try:
+        users_res = await asyncio.to_thread(lambda: db.client.table('users').select('user_id', count='exact').execute())
+        total_users = users_res.count if users_res.count else 0
+        
+        rev_res = await asyncio.to_thread(lambda: db.client.table('users').select('total_spent').execute())
+        total_revenue = sum(item['total_spent'] for item in rev_res.data) if rev_res.data else 0
+    except:
+        total_users, total_revenue = 0, 0
+
     text = (
-        f"⚙️ <b>ADMIN PANEL</b>\n"
-        f"🏦 Nguồn TrumSMM: <b>{admin_balance:,} đ</b>\n"
-        f"📈 Lãi: <b>{settings['markup_percent']}%</b>\n"
-        f"📚 Link Hướng dẫn: {settings['guide_link']}\n"
-        f"💳 Bank: {settings['bank_info']}"
+        f"👑 <b>BẢNG ĐIỀU KHIỂN ADMIN</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"🏦 Vốn nhập hàng: <b>{admin_balance:,} đ</b>\n"
+        f"👥 Tổng User Bot: <b>{total_users} người</b>\n"
+        f"💸 Tổng Doanh Thu: <b>{total_revenue:,} đ</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"<i>Chọn danh mục quản lý bên dưới:</i>"
     )
     
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💸 Cộng tiền", callback_data="admin_add_money"), InlineKeyboardButton(text="📈 Chỉnh Lãi", callback_data="admin_set_markup"))
-    builder.row(InlineKeyboardButton(text="📚 Sửa Link Hướng Dẫn", callback_data="admin_set_guide"))
-    builder.row(InlineKeyboardButton(text="💳 Sửa Ngân Hàng", callback_data="admin_set_bank"))
-    builder.row(InlineKeyboardButton(text="⬅️ Trở về User", callback_data="menu_main"))
+    builder.row(
+        InlineKeyboardButton(text="👥 Quản lý User", callback_data="admin_users"),
+        InlineKeyboardButton(text="⚙️ Cài đặt chung", callback_data="admin_settings")
+    )
+    builder.row(InlineKeyboardButton(text="📢 Gửi thông báo (Broadcast)", callback_data="admin_broadcast"))
+    builder.row(InlineKeyboardButton(text="⬅️ Thoát Admin", callback_data="menu_main"))
+    
+    # Edit text an toàn (tránh lỗi message not modified)
+    try:
+        await call.message.edit_text(text, reply_markup=builder.as_markup())
+    except:
+        pass
+
+# --- 1. ADMIN CÀI ĐẶT CHUNG ---
+@dp.callback_query(F.data == "admin_settings")
+async def admin_settings_menu(call: CallbackQuery):
+    await call.answer()
+    settings = await db.get_settings()
+    
+    text = (
+        f"⚙️ <b>CÀI ĐẶT HỆ THỐNG</b>\n\n"
+        f"📈 Lãi suất hiện tại: <b>{settings['markup_percent']}%</b>\n"
+        f"📚 Link HD: <code>{settings['guide_link']}</code>\n"
+        f"💳 Bank: <code>{settings['bank_info']}</code>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📈 Sửa Lãi Suất (%)", callback_data="admin_set_markup"))
+    builder.row(
+        InlineKeyboardButton(text="📚 Sửa Link HD", callback_data="admin_set_guide"),
+        InlineKeyboardButton(text="💳 Sửa Bank", callback_data="admin_set_bank")
+    )
+    builder.row(InlineKeyboardButton(text="⬅️ Quay lại Admin", callback_data="admin_panel"))
     
     await call.message.edit_text(text, reply_markup=builder.as_markup())
 
-@dp.callback_query(F.data == "admin_set_guide")
-async def set_guide(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.in_(["admin_set_markup", "admin_set_guide", "admin_set_bank"]))
+async def ask_for_setting(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    await call.message.edit_text("Nhập link bài Hướng dẫn mới (VD: https://t.me/post):")
-    await state.set_state(AdminStates.waiting_for_guide)
+    action = call.data
+    if action == "admin_set_markup":
+        await call.message.edit_text("Nhập phần trăm lãi mới (VD: 20):", reply_markup=get_cancel_button())
+        await state.set_state(AdminStates.waiting_for_markup)
+    elif action == "admin_set_guide":
+        await call.message.edit_text("Nhập Link Hướng dẫn mới:", reply_markup=get_cancel_button())
+        await state.set_state(AdminStates.waiting_for_guide)
+    elif action == "admin_set_bank":
+        await call.message.edit_text("Nhập thông tin Bank mới (VD: MSB | 1234 | Tên):", reply_markup=get_cancel_button())
+        await state.set_state(AdminStates.waiting_for_bank)
+
+@dp.message(AdminStates.waiting_for_markup)
+async def save_markup(message: Message, state: FSMContext):
+    try:
+        val = int(message.text)
+        await db.update_setting("markup_percent", val)
+        await message.answer(f"✅ Đã cập nhật lãi suất: {val}%")
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Vui lòng nhập SỐ nguyên!", reply_markup=get_cancel_button())
 
 @dp.message(AdminStates.waiting_for_guide)
-async def finish_guide(message: Message, state: FSMContext):
+async def save_guide(message: Message, state: FSMContext):
     await db.update_setting("guide_link", message.text)
     await message.answer("✅ Đã cập nhật Link Hướng dẫn!")
     await state.clear()
 
-@dp.callback_query(F.data == "admin_set_bank")
-async def set_bank(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.edit_text("Nhập thông tin Ngân hàng mới (VD: MSB | 123456 | ADMIN):")
-    await state.set_state(AdminStates.waiting_for_bank)
-
 @dp.message(AdminStates.waiting_for_bank)
-async def finish_bank(message: Message, state: FSMContext):
+async def save_bank(message: Message, state: FSMContext):
     await db.update_setting("bank_info", message.text)
-    await message.answer("✅ Đã cập nhật STK Ngân hàng!")
+    await message.answer("✅ Đã cập nhật Bank!")
     await state.clear()
 
-@dp.callback_query(F.data == "admin_set_markup")
-async def set_markup(call: CallbackQuery, state: FSMContext):
+# --- 2. ADMIN QUẢN LÝ USER ---
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_menu(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    await call.message.edit_text("Nhập % lãi mới:")
-    await state.set_state(AdminStates.waiting_for_markup)
+    await call.message.edit_text("🔍 Nhập <b>UserID</b> của khách hàng bạn muốn kiểm tra:", reply_markup=get_cancel_button())
+    await state.set_state(AdminStates.waiting_for_search_user)
 
-@dp.message(AdminStates.waiting_for_markup)
-async def finish_markup(message: Message, state: FSMContext):
-    await db.update_setting("markup_percent", int(message.text))
-    await message.answer("✅ Đã cập nhật lãi suất!")
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_add_money")
-async def add_money(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.edit_text("Nhập UserID:")
-    await state.set_state(AdminStates.waiting_for_user_id)
-
-@dp.message(AdminStates.waiting_for_user_id)
-async def add_money_step2(message: Message, state: FSMContext):
-    await state.update_data(target_user=message.text)
-    await message.answer("Nhập số tiền:")
-    await state.set_state(AdminStates.waiting_for_amount)
-
-@dp.message(AdminStates.waiting_for_amount)
-async def finish_add_money(message: Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = int(data['target_user'])
-    amount = int(message.text)
-    new_bal = await db.update_balance(user_id, amount, is_deposit=True)
-    await message.answer(f"✅ Đã cộng {amount:,}đ. Số dư mới: {new_bal:,}đ")
+@dp.message(AdminStates.waiting_for_search_user)
+async def search_user_result(message: Message, state: FSMContext):
     try:
-        await bot.send_message(user_id, f"🎉 Admin đã cộng {amount:,}đ vào tài khoản!")
-    except:
-        pass
+        user_id = int(message.text)
+        res = await asyncio.to_thread(lambda: db.client.table('users').select('*').eq('user_id', user_id).execute())
+        
+        if not res.data:
+            return await message.answer("❌ Không tìm thấy User này trong hệ thống!", reply_markup=get_cancel_button())
+            
+        user = res.data[0]
+        rank, _, _, _, _ = get_vip_info(user['total_deposit'])
+        
+        text = (
+            f"👤 <b>Thông tin User</b>\n"
+            f"ID: <code>{user['user_id']}</code>\n"
+            f"Tên: <b>{user['full_name']}</b>\n"
+            f"Cấp bậc: <b>{rank}</b>\n"
+            f"Số dư: <b>{user['balance']:,} đ</b>\n"
+            f"Tổng nạp: <b>{user['total_deposit']:,} đ</b>\n"
+            f"Tổng chi: <b>{user['total_spent']:,} đ</b>"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="➕ Cộng tiền", callback_data=f"addbal_{user_id}"),
+            InlineKeyboardButton(text="➖ Trừ tiền", callback_data=f"deductbal_{user_id}")
+        )
+        builder.row(InlineKeyboardButton(text="⬅️ Quay lại Admin", callback_data="admin_panel"))
+        
+        await message.answer(text, reply_markup=builder.as_markup())
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ UserID phải là chữ số!", reply_markup=get_cancel_button())
+
+@dp.callback_query(F.data.startswith("addbal_") | F.data.startswith("deductbal_"))
+async def ask_balance_change(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    action, user_id = call.data.split("_")
+    
+    await state.update_data(target_user=user_id)
+    if action == "addbal":
+        await call.message.edit_text(f"💰 Nhập số tiền muốn <b>CỘNG</b> cho User <code>{user_id}</code>:", reply_markup=get_cancel_button())
+        await state.set_state(AdminStates.waiting_for_add_money)
+    else:
+        await call.message.edit_text(f"💸 Nhập số tiền muốn <b>TRỪ</b> của User <code>{user_id}</code>:", reply_markup=get_cancel_button())
+        await state.set_state(AdminStates.waiting_for_deduct_money)
+
+@dp.message(AdminStates.waiting_for_add_money)
+async def process_add_money(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text)
+        data = await state.get_data()
+        user_id = int(data['target_user'])
+        
+        new_bal = await db.update_balance(user_id, amount, is_deposit=True)
+        await message.answer(f"✅ Đã CỘNG <b>{amount:,}đ</b>.\nSố dư mới của khách: <b>{new_bal:,}đ</b>")
+        try:
+            await bot.send_message(user_id, f"🎉 Admin đã cộng <b>{amount:,}đ</b> vào tài khoản của bạn!")
+        except: pass
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Vui lòng nhập số hợp lệ!", reply_markup=get_cancel_button())
+
+@dp.message(AdminStates.waiting_for_deduct_money)
+async def process_deduct_money(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text)
+        data = await state.get_data()
+        user_id = int(data['target_user'])
+        
+        # Trừ tiền (amount âm)
+        new_bal = await db.update_balance(user_id, -amount)
+        await message.answer(f"✅ Đã TRỪ <b>{amount:,}đ</b>.\nSố dư mới của khách: <b>{new_bal:,}đ</b>")
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Vui lòng nhập số hợp lệ!", reply_markup=get_cancel_button())
+
+# --- 3. ADMIN BROADCAST (GỬI THÔNG BÁO) ---
+@dp.callback_query(F.data == "admin_broadcast")
+async def ask_broadcast_msg(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    text = "📢 Nhập nội dung bạn muốn gửi tới <b>TẤT CẢ</b> khách hàng trong hệ thống (Hỗ trợ định dạng HTML):"
+    await call.message.edit_text(text, reply_markup=get_cancel_button())
+    await state.set_state(AdminStates.waiting_for_broadcast)
+
+@dp.message(AdminStates.waiting_for_broadcast)
+async def send_broadcast(message: Message, state: FSMContext):
+    msg_text = message.text
+    await message.answer("⏳ Đang tiến hành gửi thông báo tới toàn bộ hệ thống...")
+    
+    # Lấy danh sách toàn bộ user (Giới hạn 1000 người mỗi lần quét để tránh nghẽn server)
+    res = await asyncio.to_thread(lambda: db.client.table('users').select('user_id').limit(1000).execute())
+    users = res.data if res.data else []
+    
+    success_count = 0
+    fail_count = 0
+    
+    for u in users:
+        try:
+            await bot.send_message(u['user_id'], f"📢 <b>THÔNG BÁO TỪ ADMIN:</b>\n\n{msg_text}")
+            success_count += 1
+            await asyncio.sleep(0.05) # Tránh bị Telegram Block Spam
+        except Exception:
+            fail_count += 1
+            
+    await message.answer(f"✅ <b>Hoàn tất Broadcast!</b>\nThành công: {success_count} người\nThất bại (Block bot): {fail_count} người")
     await state.clear()
 
-# Bắt các nút chưa có chức năng (Chống lỗi treo)
+# ==========================================
+# KHỬ LỖI TREO NÚT TRỐNG
+# ==========================================
 @dp.callback_query(F.data == "ignore_btn")
 async def ignore_callback(call: CallbackQuery):
     await call.answer("Chức năng đang phát triển!", show_alert=False)
@@ -473,7 +613,7 @@ async def ignore_callback(call: CallbackQuery):
 # KHỞI CHẠY RENDER
 # ==========================================
 async def start_telegram_bot():
-    print("🚀 Bot Reseller VIP đang khởi động...")
+    print("🚀 Bot Reseller VIP (Full Logic) đang khởi động...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
