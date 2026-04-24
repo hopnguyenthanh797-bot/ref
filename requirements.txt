@@ -1,6 +1,5 @@
 aiogram
+aiohttp
 fastapi
 uvicorn
-sqlalchemy
-aiosqlite
-pydantic
+supabase
