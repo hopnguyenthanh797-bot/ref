@@ -409,8 +409,11 @@ async def check_otp_handler(call: CallbackQuery):
             await call.message.answer(f"🎉 <b>THÀNH CÔNG!</b>\nMã đăng nhập Telegram của bạn là: <code>{otp_code}</code>")
         else:
             await call.message.answer("⚠️ <b>Chưa có mã gửi về!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ vài giây và Check lại.")
-    except Exception as e:
-        await call.message.answer(f"❌ Tài khoản đã bị văng đăng nhập (Session Die).")
+        except Exception as e:
+        error_msg = str(e)
+        print(f"LỖI SESSION: {error_msg}")
+        await call.message.answer(f"❌ <b>Lỗi kỹ thuật hệ thống:</b>\n<code>{error_msg}</code>\n\n<i>(Nếu lỗi ghi là 'no such table' hoặc 'sqlite3', thì 100% là do lệch định dạng Telethon/Pyrogram)</i>")
+
 
 # ==========================================
 # NẠP TIỀN & SEPAY WEBHOOK
