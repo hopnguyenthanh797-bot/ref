@@ -3,3 +3,6 @@ aiohttp
 fastapi
 uvicorn
 supabase
+pyrogram
+tgcrypto
+aiofiles
