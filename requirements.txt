@@ -1,8 +1,8 @@
-aiogram
-aiohttp
-fastapi
-uvicorn
-supabase
-pyrogram
-tgcrypto
-aiofiles
+aiogram>=3.4.0
+aiohttp>=3.9.3
+fastapi>=0.109.2
+uvicorn>=0.27.1
+supabase>=2.3.4
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+aiofiles>=23.2.1
