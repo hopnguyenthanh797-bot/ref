@@ -5,11 +5,11 @@ import shutil
 import zipfile
 import asyncio
 import aiofiles
+import aiohttp
 from datetime import datetime
 
 # ==========================================
-# FIX LỖI CỦA PYROGRAM TRÊN PYTHON MỚI (RENDER)
-# Đảm bảo có Event Loop trước khi import Pyrogram
+# FIX LỖI EVENT LOOP CỦA PYROGRAM & RENDER
 # ==========================================
 try:
     asyncio.get_running_loop()
@@ -49,6 +49,22 @@ class AdminStates(StatesGroup):
     waiting_for_add_money = State()
     waiting_for_deduct_money = State()
     waiting_for_broadcast = State()
+
+# ==========================================
+# HỆ THỐNG GIỮ BOT CHẠY 24/7 (ANTI-SLEEP)
+# ==========================================
+async def keep_alive_task():
+    """Tự động Ping máy chủ mỗi 10 phút để Render không tắt Bot"""
+    while True:
+        await asyncio.sleep(600)  # Nghỉ 10 phút
+        try:
+            # Lấy URL của Render, nếu test local thì gọi localhost
+            url = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{config.PORT}")
+            async with aiohttp.ClientSession() as session:
+                await session.get(url)
+                print(f"[24/7 KEEP ALIVE] Đã ping thành công: {url}")
+        except Exception as e:
+            print(f"[24/7 KEEP ALIVE] Lỗi ping: {e}")
 
 # ==========================================
 # CÁC HÀM BỔ TRỢ (HELPERS)
@@ -220,6 +236,7 @@ async def show_products_in_cat(call: CallbackQuery):
         btn_text = f"📦 {pos.get('position_name')} | {sell_price:,}đ | [{pos.get('stock')}]"
         builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"buy_{pos.get('position_id')}_{sell_price}"))
     
+    # Điều hướng
     nav_row = []
     if total_pages > 1:
         nav_row.append(InlineKeyboardButton(text="⬅️ Trước", callback_data=f"showcat_{cat_id}_{page-1}") if page > 1 else InlineKeyboardButton(text="➖", callback_data="ignore_btn"))
@@ -347,10 +364,11 @@ async def handle_zip_document(message: Message):
         )
         
         builder = InlineKeyboardBuilder()
+        safe_session_dir = f"sessions_data/{user_id}"
+        os.makedirs(safe_session_dir, exist_ok=True)
+        
         for index, session_path in enumerate(session_files, start=1):
             phone_number = os.path.basename(session_path).replace('.session', '')
-            safe_session_dir = f"sessions_data/{user_id}"
-            os.makedirs(safe_session_dir, exist_ok=True)
             safe_session_path = os.path.join(safe_session_dir, f"{phone_number}.session")
             
             shutil.copy(session_path, safe_session_path)
@@ -383,37 +401,56 @@ async def session_info_handler(call: CallbackQuery):
     builder.row(InlineKeyboardButton(text="✅ Check (Lấy Mã OTP)", callback_data=f"getotp_{user_id}_{phone_number}"))
     await call.message.answer(text, reply_markup=builder.as_markup())
 
+# ==========================================
+# FIX LỖI ĐỌC FILE SESSION CỦA PYROGRAM CHUẨN XÁC NHẤT
+# ==========================================
 @dp.callback_query(F.data.startswith("getotp_"))
 async def check_otp_handler(call: CallbackQuery):
     await call.answer("Đang thâm nhập hệ thống Telegram lấy mã...", show_alert=False)
     _, user_id, phone_number = call.data.split("_")
-    session_path = f"sessions_data/{user_id}/{phone_number}" 
     
-    if not os.path.exists(f"{session_path}.session"):
-        return await call.message.answer("❌ Dữ liệu phiên đã hết hạn hoặc bị xóa.")
+    # Chỉ định thư mục chứa session và tên file để Pyrogram không bị nhầm lẫn
+    work_dir = f"sessions_data/{user_id}"
+    full_session_path = os.path.join(work_dir, f"{phone_number}.session")
+    
+    if not os.path.exists(full_session_path):
+        return await call.message.answer("❌ Dữ liệu phiên đã hết hạn hoặc bị xóa khỏi máy chủ.")
 
-    app_client = Client(name=session_path, api_id=2040, api_hash="b18441a1ff607e10a989891a5462e627", in_memory=False, no_updates=True)
+    # Khởi tạo Pyrogram chuẩn chỉ
+    app_client = Client(
+        name=phone_number, # Tên này phải khớp với tên file (không có đuôi .session)
+        workdir=work_dir,  # Thư mục chứa file
+        api_id=2040, 
+        api_hash="b18441a1ff607e10a989891a5462e627", 
+        in_memory=False, 
+        no_updates=True
+    )
     
     try:
         await app_client.connect()
         otp_code = None
+        
         async for msg in app_client.get_chat_history(777000, limit=3):
             if msg.text:
                 match = re.search(r'\b(\d{5})\b', msg.text)
                 if match:
                     otp_code = match.group(1)
                     break
+                    
         await app_client.disconnect()
         
         if otp_code:
             await call.message.answer(f"🎉 <b>THÀNH CÔNG!</b>\nMã đăng nhập Telegram của bạn là: <code>{otp_code}</code>")
         else:
             await call.message.answer("⚠️ <b>Chưa có mã gửi về!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ vài giây và Check lại.")
-        except Exception as e:
-        error_msg = str(e)
-        print(f"LỖI SESSION: {error_msg}")
-        await call.message.answer(f"❌ <b>Lỗi kỹ thuật hệ thống:</b>\n<code>{error_msg}</code>\n\n<i>(Nếu lỗi ghi là 'no such table' hoặc 'sqlite3', thì 100% là do lệch định dạng Telethon/Pyrogram)</i>")
-
+            
+    except Exception as e:
+        error_info = str(e)
+        print(f"[PYROGRAM ERROR] {error_info}")
+        if "sqlite3" in error_info or "database is locked" in error_info or "no such table" in error_info:
+            await call.message.answer("❌ Lỗi định dạng Session: File này được tạo bằng Telethon, không tương thích với bộ đọc Pyrogram của Bot.")
+        else:
+            await call.message.answer(f"❌ Phiên đăng nhập đã chết hoặc có lỗi xảy ra:\n<code>{error_info}</code>")
 
 # ==========================================
 # NẠP TIỀN & SEPAY WEBHOOK
@@ -435,6 +472,10 @@ async def show_deposit(call: CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="⬅️ Trở về Trang Chủ", callback_data="menu_main"))
     await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+@app.get("/")
+async def root():
+    return {"status": "success", "message": "Bot is running 24/7 on Render!"}
 
 @app.post("/sepay-webhook")
 async def sepay_webhook(request: Request):
@@ -632,13 +673,16 @@ async def ignore_callback(call: CallbackQuery):
 # CHẠY HỆ THỐNG
 # ==========================================
 async def start_telegram_bot():
-    print("🚀 Khởi động Bot Reseller MMO...")
+    print("🚀 Khởi động Bot Reseller MMO 24/7...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 @app.on_event("startup")
 async def on_startup():
+    # Chạy Bot ngầm
     asyncio.create_task(start_telegram_bot())
+    # Chạy luồng Ping 24/7
+    asyncio.create_task(keep_alive_task())
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, log_level="info")
