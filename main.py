@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.client.default import DefaultBotProperties
 
 from config import config
 from database import db
@@ -14,7 +15,7 @@ from api_trumsmm import trum_api
 
 # --- KHỞI TẠO ---
 app = FastAPI()
-bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
+bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 # --- FSM CHO ADMIN ---
