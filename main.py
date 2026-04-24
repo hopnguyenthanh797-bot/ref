@@ -6,7 +6,8 @@ import zipfile
 import asyncio
 import aiofiles
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 # ==========================================
 # FIX LỖI EVENT LOOP CỦA PYTHON TRÊN RENDER
@@ -19,7 +20,6 @@ except RuntimeError:
 from fastapi import FastAPI, Request
 import uvicorn
 
-# Thay thế Pyrogram bằng Telethon
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneNumberBannedError
 
@@ -97,6 +97,37 @@ def get_vip_info(total_deposit: int):
 
 def create_divider():
     return "━━━━━━━━━━━━━━━━━━━━━━"
+
+async def extract_otp_from_messages(client: TelegramClient, chat_id: int = 777000) -> Optional[str]:
+    """Fetch the recent otp code from telegram service notifications with Time Filter."""
+    try:
+        current_time = datetime.now(timezone.utc)
+        
+        # reverse=False gets the newest messages first
+        messages = await client.get_messages(chat_id, limit=5, reverse=False)
+
+        for message in messages:
+            if message.text:
+                # Regex tìm chuỗi 5 chữ số (bắt cả bản tiếng Anh lẫn tiếng Việt)
+                match = re.search(r'\b(\d{5})\b', message.text)
+                if match:
+                    otp_code: str = match.group(1)
+                    message_time = message.date
+                    time_diff = (current_time - message_time).total_seconds()
+
+                    # allow up to 180 seconds buffer (3 phút) để khách kịp thao tác
+                    if 0 <= time_diff <= 180:
+                        print(f"[✓] OTP Code Found: {otp_code}")
+                        print(f"    Message Age: {int(time_diff)} seconds")
+                        return otp_code
+                    else:
+                        print(f"[!] Bỏ qua mã cũ {otp_code} (Tuổi thọ: {int(time_diff)}s)")
+
+        return None
+
+    except Exception as e:
+        print(f"[✗] Error extracting OTP: {str(e)}")
+        return None
 
 # ==========================================
 # GIAO DIỆN CHÍNH & CÁ NHÂN TỐI ƯU
@@ -427,7 +458,7 @@ async def session_info_handler(call: CallbackQuery):
     await call.message.answer(text, reply_markup=builder.as_markup())
 
 # ==========================================
-# CỖ MÁY QUÉT OTP BẰNG TELETHON (BẢN CHỐNG CRASH)
+# CỖ MÁY QUÉT OTP BẰNG TELETHON - NÂNG CẤP VỚI HÀM CỦA SẾP
 # ==========================================
 @dp.callback_query(F.data.startswith("getotp_"))
 async def check_otp_handler(call: CallbackQuery):
@@ -440,7 +471,6 @@ async def check_otp_handler(call: CallbackQuery):
     if not os.path.exists(full_session_path):
         return await call.message.answer("❌ Dữ liệu phiên đã hết hạn hoặc bị xóa khỏi máy chủ.")
 
-    # Khởi tạo Telethon. Telethon sẽ tự tìm file phone_number.session trong work_dir
     client = TelegramClient(
         session=os.path.join(work_dir, phone_number),
         api_id=2040, 
@@ -450,27 +480,19 @@ async def check_otp_handler(call: CallbackQuery):
     try:
         await client.connect()
         
-        # Phân biệt rõ Acc bị ban và Acc đang sống
         if not await client.is_user_authorized():
             await client.disconnect()
             return await call.message.answer("❌ Phiên đăng nhập không hợp lệ hoặc đã bị Telegram đăng xuất (Session Die).")
             
-        otp_code = None
-        
-        # Quét 3 tin nhắn mới nhất từ Telegram
-        async for msg in client.iter_messages(777000, limit=3):
-            if msg.message:
-                match = re.search(r'\b(\d{5})\b', msg.message)
-                if match:
-                    otp_code = match.group(1)
-                    break
+        # Áp dụng siêu hàm chống trùng mã của sếp
+        otp_code = await extract_otp_from_messages(client)
                     
         await client.disconnect()
         
         if otp_code:
             await call.message.answer(f"🎉 <b>THÀNH CÔNG!</b>\nMã đăng nhập Telegram của bạn là: <code>{otp_code}</code>")
         else:
-            await call.message.answer("⚠️ <b>Chưa có mã gửi về!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ 5 giây và Check lại.")
+            await call.message.answer("⚠️ <b>Chưa có mã gửi về hoặc mã đã cũ!</b>\nHãy chắc chắn bạn đã bấm 'Send Code as SMS' trên ứng dụng của bạn, chờ 5 giây và Check lại.")
             
     except PhoneNumberBannedError:
         await call.message.answer("❌ Tài khoản này đã bị Telegram BAN hoàn toàn (Banned).")
