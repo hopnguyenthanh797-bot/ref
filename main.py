@@ -473,8 +473,8 @@ async def check_otp_handler(call: CallbackQuery):
 
     client = TelegramClient(
         session=os.path.join(work_dir, phone_number),
-        api_id=2040, 
-        api_hash="b18441a1ff607e10a989891a5462e627"
+        api_id=36437338, 
+        api_hash="18d34c7efc396d277f3db62baa078efc"
     )
     
     try:
