@@ -348,7 +348,7 @@ async def show_history(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=builder.as_markup())
 
 # ==========================================
-# LUỒNG XỬ LÝ FILE ZIP VÀ LẤY OTP TỰ ĐỘNG (BẢN TELETHON TỐI ƯU)
+# LUỒNG XỬ LÝ FILE ZIP VÀ LẤY OTP TỰ ĐỘNG
 # ==========================================
 @dp.message(F.document)
 async def handle_zip_document(message: Message):
@@ -458,7 +458,7 @@ async def session_info_handler(call: CallbackQuery):
     await call.message.answer(text, reply_markup=builder.as_markup())
 
 # ==========================================
-# CỖ MÁY QUÉT OTP BẰNG TELETHON - NÂNG CẤP VỚI HÀM CỦA SẾP
+# CỖ MÁY QUÉT OTP - NÂNG CẤP CHỐNG BAN (MÔ PHỎNG NGƯỜI DÙNG)
 # ==========================================
 @dp.callback_query(F.data.startswith("getotp_"))
 async def check_otp_handler(call: CallbackQuery):
@@ -471,10 +471,17 @@ async def check_otp_handler(call: CallbackQuery):
     if not os.path.exists(full_session_path):
         return await call.message.answer("❌ Dữ liệu phiên đã hết hạn hoặc bị xóa khỏi máy chủ.")
 
+    # TẦNG BẢO MẬT 1 & 3: Giả lập Thiết bị xịn & Tắt nhận bản cập nhật ngầm
     client = TelegramClient(
         session=os.path.join(work_dir, phone_number),
-        api_id=36437338, 
-        api_hash="18d34c7efc396d277f3db62baa078efc"
+        api_id=2040, 
+        api_hash="b18441a1ff607e10a989891a5462e627",
+        device_model="Samsung Galaxy S24 Ultra",  # Lừa Telegram đây là điện thoại
+        system_version="Android 14.0",            # Hệ điều hành chuẩn
+        app_version="10.14.5",                    # Phiên bản app tự nhiên
+        lang_code="en",
+        system_lang_code="en",
+        receive_updates=False                     # Không online diện rộng
     )
     
     try:
@@ -483,6 +490,9 @@ async def check_otp_handler(call: CallbackQuery):
         if not await client.is_user_authorized():
             await client.disconnect()
             return await call.message.answer("❌ Phiên đăng nhập không hợp lệ hoặc đã bị Telegram đăng xuất (Session Die).")
+        
+        # TẦNG BẢO MẬT 2: Giả lập độ trễ của con người (Tránh thao tác quá nhanh)
+        await asyncio.sleep(2) 
             
         # Áp dụng siêu hàm chống trùng mã của sếp
         otp_code = await extract_otp_from_messages(client)
